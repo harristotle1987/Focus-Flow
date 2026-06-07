@@ -1,0 +1,6 @@
+{
+  "name": "Focus-Flow",
+  "description": "A contextual application blocker that helps you eliminate distractions, active in Pomodoro style Focus Sessions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
