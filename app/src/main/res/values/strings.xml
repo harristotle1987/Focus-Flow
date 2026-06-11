@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Focus-Flow</string>
+    <string name="accessibility_service_description">Focus-Flow monitors active applications during focus sessions to automatically block distractions and keep you productive.</string>
 </resources>

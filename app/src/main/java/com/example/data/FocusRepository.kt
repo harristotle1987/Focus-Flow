@@ -14,7 +14,13 @@ class FocusRepository(private val focusDao: FocusDao) {
         return focusDao.getActiveSession()
     }
 
-    suspend fun startSession(label: String, durationMinutes: Int): FocusSession {
+    suspend fun startSession(
+        label: String,
+        durationMinutes: Int,
+        isBreak: Boolean = false,
+        isPomodoro: Boolean = false,
+        pomodoroWorkDuration: Int = 25
+    ): FocusSession {
         // Deactivate any currently active sessions first
         focusDao.deactivateAllSessions()
         val startTime = System.currentTimeMillis()
@@ -24,7 +30,10 @@ class FocusRepository(private val focusDao: FocusDao) {
             durationMinutes = durationMinutes,
             startTime = startTime,
             endTime = endTime,
-            isActive = true
+            isActive = true,
+            isBreak = isBreak,
+            isPomodoro = isPomodoro,
+            pomodoroWorkDuration = pomodoroWorkDuration
         )
         val id = focusDao.insertFocusSession(session)
         return session.copy(id = id.toInt())
@@ -62,6 +71,46 @@ class FocusRepository(private val focusDao: FocusDao) {
 
     suspend fun logBlockedAttempt(packageName: String, appName: String) {
         focusDao.insertBlockedAttempt(BlockedAttempt(packageName = packageName, appName = appName))
+    }
+
+    val allNotificationLogs: Flow<List<NotificationLog>> = focusDao.getAllNotificationLogsFlow()
+    val allWifiAnchors: Flow<List<WifiAnchor>> = focusDao.getAllWifiAnchorsFlow()
+
+    suspend fun insertAppSwitchLog(packageName: String) {
+        focusDao.insertAppSwitchLog(AppSwitchLog(packageName = packageName))
+    }
+
+    suspend fun getAppSwitchesInLast10Minutes(): List<AppSwitchLog> {
+        val tenMinsAgo = System.currentTimeMillis() - (10 * 60 * 1000L)
+        return focusDao.getAppSwitchesSince(tenMinsAgo)
+    }
+
+    suspend fun clearOldAppSwitches() {
+        val oneHourAgo = System.currentTimeMillis() - (60 * 60 * 1000L)
+        focusDao.deleteOldAppSwitches(oneHourAgo)
+    }
+
+    suspend fun insertNotificationLog(packageName: String, appName: String, title: String, text: String) {
+        focusDao.insertNotificationLog(
+            NotificationLog(
+                packageName = packageName,
+                appName = appName,
+                title = title,
+                text = text
+            )
+        )
+    }
+
+    suspend fun clearNotificationDigest() {
+        focusDao.clearAllNotificationLogs()
+    }
+
+    suspend fun insertWifiAnchor(ssid: String, durationMinutes: Int = 25) {
+        focusDao.insertWifiAnchor(WifiAnchor(ssid, durationMinutes))
+    }
+
+    suspend fun deleteWifiAnchor(ssid: String) {
+        focusDao.deleteWifiAnchor(WifiAnchor(ssid))
     }
 
     fun getTodayBlockedCountFlow(): Flow<Int> {

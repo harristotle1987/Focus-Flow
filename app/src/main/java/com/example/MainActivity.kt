@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -84,6 +85,8 @@ fun FocusFlowApp(viewModel: FocusViewModel) {
     val activeSession by viewModel.activeSession.collectAsStateWithLifecycle()
     val allBlockedAttempts by viewModel.allBlockedAttempts.collectAsStateWithLifecycle()
     val todayBlockedCount by viewModel.todayBlockedCount.collectAsStateWithLifecycle()
+    val allNotificationLogs by viewModel.allNotificationLogs.collectAsStateWithLifecycle()
+    val allWifiAnchors by viewModel.allWifiAnchors.collectAsStateWithLifecycle()
 
     // Observe Blocker Overlay state
     val isOverlayActive by viewModel.isBlockOverlayActive.collectAsStateWithLifecycle()
@@ -95,12 +98,14 @@ fun FocusFlowApp(viewModel: FocusViewModel) {
     var hasStatsPerm by remember { mutableStateOf(PermissionUtils.hasUsageStatsPermission(context)) }
     var hasOverlayPerm by remember { mutableStateOf(PermissionUtils.hasOverlayPermission(context)) }
     var hasNotifyPerm by remember { mutableStateOf(PermissionUtils.hasNotificationPermission(context)) }
+    var hasAccessibilityPerm by remember { mutableStateOf(PermissionUtils.isAccessibilityServiceEnabled(context, com.example.service.FocusAccessibilityService::class.java)) }
 
     // Re-verify permissions when returning to activity
     LaunchedEffect(isOverlayActive) {
         hasStatsPerm = PermissionUtils.hasUsageStatsPermission(context)
         hasOverlayPerm = PermissionUtils.hasOverlayPermission(context)
         hasNotifyPerm = PermissionUtils.hasNotificationPermission(context)
+        hasAccessibilityPerm = PermissionUtils.isAccessibilityServiceEnabled(context, com.example.service.FocusAccessibilityService::class.java)
     }
 
     Surface(
@@ -114,6 +119,7 @@ fun FocusFlowApp(viewModel: FocusViewModel) {
                 timeLeft = overlayTimeLeft,
                 quote = randomQuote.first,
                 author = randomQuote.second,
+                isPowerConnected = false,
                 onCloseTap = {
                     // Redirect safely to home screen to bypass distraction
                     viewModel.dismissBlockOverlay()
@@ -176,6 +182,20 @@ fun FocusFlowApp(viewModel: FocusViewModel) {
                             ),
                             modifier = Modifier.testTag("nav_stats_tab")
                         )
+                        NavigationBarItem(
+                            selected = selectedTab == 3,
+                            onClick = { selectedTab = 3 },
+                            icon = { Icon(Icons.Default.Settings, contentDescription = "Advanced Settings Dashboard") },
+                            label = { Text("Advanced") },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = SpaceTeal,
+                                unselectedIconColor = SpaceTextSecondary,
+                                selectedTextColor = SpaceTeal,
+                                unselectedTextColor = SpaceTextSecondary,
+                                indicatorColor = SpaceCard
+                            ),
+                            modifier = Modifier.testTag("nav_advanced_tab")
+                        )
                     }
                 }
             ) { innerPadding ->
@@ -192,11 +212,13 @@ fun FocusFlowApp(viewModel: FocusViewModel) {
                             hasStatsPerm = hasStatsPerm,
                             hasOverlayPerm = hasOverlayPerm,
                             hasNotifyPerm = hasNotifyPerm,
+                            hasAccessibilityPerm = hasAccessibilityPerm,
                             todayBlockedCount = todayBlockedCount,
                             onRefreshPermissions = {
                                 hasStatsPerm = PermissionUtils.hasUsageStatsPermission(context)
                                 hasOverlayPerm = PermissionUtils.hasOverlayPermission(context)
                                 hasNotifyPerm = PermissionUtils.hasNotificationPermission(context)
+                                hasAccessibilityPerm = PermissionUtils.isAccessibilityServiceEnabled(context, com.example.service.FocusAccessibilityService::class.java)
                             }
                         )
                         1 -> BlocklistScreen(
@@ -206,6 +228,11 @@ fun FocusFlowApp(viewModel: FocusViewModel) {
                         2 -> StatsDashboardScreen(
                             todayBlockedCount = todayBlockedCount,
                             allBlockedAttempts = allBlockedAttempts
+                        )
+                        3 -> AdvancedDashboardScreen(
+                            viewModel = viewModel,
+                            allNotificationLogs = allNotificationLogs,
+                            allWifiAnchors = allWifiAnchors
                         )
                     }
                 }
@@ -221,13 +248,14 @@ fun FocusHomeScreen(
     hasStatsPerm: Boolean,
     hasOverlayPerm: Boolean,
     hasNotifyPerm: Boolean,
+    hasAccessibilityPerm: Boolean,
     todayBlockedCount: Int,
     onRefreshPermissions: () -> Unit
 ) {
     val context = LocalContext.current
     var sessionLabel by remember { mutableStateOf("Co-Work Sprint") }
     var durationMinutes by remember { mutableStateOf(25f) }
-    var showPresetDialog by remember { mutableStateOf(false) }
+    var selectedMode by remember { mutableStateOf(1) } // Default to Pomodoro mode as requested
 
     LazyColumn(
         modifier = Modifier
@@ -277,7 +305,7 @@ fun FocusHomeScreen(
         }
 
         // Permission check alert widget block
-        if (!hasStatsPerm || !hasOverlayPerm) {
+        if (!hasStatsPerm || !hasOverlayPerm || !hasAccessibilityPerm) {
             item {
                 Card(
                     modifier = Modifier
@@ -297,34 +325,48 @@ fun FocusHomeScreen(
                             color = SpaceTeal
                         )
                         Text(
-                            text = "To monitor distractions and overlays, Focus-Flow requires 'Usage Access' and 'Draw over other apps' permissions.",
+                            text = "To monitor distractions and overlays, Focus-Flow requires 'Accessibility Service', 'Draw over other apps' and 'Usage Access' permissions.",
                             style = MaterialTheme.typography.bodySmall,
                             color = SpaceTextSecondary
                         )
 
-                        if (!hasStatsPerm) {
-                            Button(
-                                onClick = { PermissionUtils.launchUsageStatsSettings(context) },
-                                colors = ButtonDefaults.buttonColors(containerColor = SpaceAccent),
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("grant_usage_btn")
-                            ) {
-                                Text("1. Grant Usage Statistics Access", fontSize = 12.sp)
-                            }
-                        }
-
                         if (!hasOverlayPerm) {
                             Button(
                                 onClick = { PermissionUtils.launchOverlaySettings(context) },
-                                colors = ButtonDefaults.buttonColors(containerColor = SpaceTeal),
+                                colors = ButtonDefaults.buttonColors(containerColor = SpaceAccent),
                                 shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .testTag("grant_overlay_btn")
                             ) {
-                                Text("2. Grant Draw Over Other Apps Overlay", fontSize = 12.sp)
+                                Text("1. Grant Draw Over Other Apps Overlay", fontSize = 12.sp)
+                            }
+                        }
+
+                        if (!hasAccessibilityPerm) {
+                            Button(
+                                onClick = { PermissionUtils.launchAccessibilitySettings(context) },
+                                colors = ButtonDefaults.buttonColors(containerColor = SpaceTeal),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("grant_accessibility_btn")
+                            ) {
+                                Text("2. Enable Blocker Accessibility Service", fontSize = 12.sp)
+                            }
+                        }
+
+                        if (!hasStatsPerm) {
+                            Button(
+                                onClick = { PermissionUtils.launchUsageStatsSettings(context) },
+                                colors = ButtonDefaults.buttonColors(containerColor = SpaceCard),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, SpaceTextSecondary),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("grant_usage_btn")
+                            ) {
+                                Text("3. Grant Usage Access (Optional Dynamic Stats)", fontSize = 11.sp, color = SpaceTextPrimary)
                             }
                         }
 
@@ -347,6 +389,29 @@ fun FocusHomeScreen(
                 ActiveFocusClockCard(
                     session = activeSession,
                     onStopTap = { viewModel.stopFocusSession(context) },
+                    onTransitionTap = { nextIsBreak ->
+                        if (nextIsBreak) {
+                            com.example.service.SoundAlertManager.playWorkToBreakSound(context)
+                            viewModel.startFocusSession(
+                                label = "Pomodoro Rest Break ☕",
+                                durationMinutes = 5,
+                                context = context,
+                                isBreak = true,
+                                isPomodoro = activeSession.isPomodoro,
+                                pomodoroWorkDuration = activeSession.pomodoroWorkDuration
+                            )
+                        } else {
+                            com.example.service.SoundAlertManager.playBreakToWorkSound(context)
+                            viewModel.startFocusSession(
+                                label = "Pomodoro Work Sprint 🎯",
+                                durationMinutes = activeSession.pomodoroWorkDuration,
+                                context = context,
+                                isBreak = false,
+                                isPomodoro = activeSession.isPomodoro,
+                                pomodoroWorkDuration = activeSession.pomodoroWorkDuration
+                            )
+                        }
+                    },
                     todayBlockedAttempts = todayBlockedCount
                 )
             }
@@ -370,79 +435,187 @@ fun FocusHomeScreen(
                             color = Color.White
                         )
 
-                        OutlinedTextField(
-                            value = sessionLabel,
-                            onValueChange = { sessionLabel = it },
-                            label = { Text("Session Goal Name") },
-                            shape = RoundedCornerShape(12.dp),
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedBorderColor = SpaceAccent,
-                                unfocusedBorderColor = SpaceTextSecondary,
-                                focusedLabelColor = SpaceAccent,
-                                unfocusedLabelColor = SpaceTextSecondary
-                            ),
+                        // Mode Selector Row
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .testTag("session_goal_input")
-                        )
-
-                        // Duration Slider
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("Duration", color = SpaceTextSecondary, fontSize = 13.sp)
-                                Text("${durationMinutes.toInt()} minutes", color = SpaceAccent, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                .background(SpaceSurface, shape = RoundedCornerShape(12.dp))
+                                .padding(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            val modes = listOf("Focus Block 🎯", "Pomodoro Loop ⏲", "Rest Break ☕")
+                            modes.forEachIndexed { index, title ->
+                                val selected = selectedMode == index
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .background(
+                                            if (selected) SpaceCard else Color.Transparent,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                        .clickable { selectedMode = index }
+                                        .padding(vertical = 10.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = title,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (selected) SpaceTeal else SpaceTextSecondary,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
                             }
-                            Slider(
-                                value = durationMinutes,
-                                onValueChange = { durationMinutes = it },
-                                valueRange = 5f..120f,
-                                steps = 23,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = SpaceAccent,
-                                    activeTrackColor = SpaceAccent,
-                                    inactiveTrackColor = SpaceSurface
-                                )
+                        }
+
+                        if (selectedMode == 0) {
+                            // Custom focus configuration
+                            OutlinedTextField(
+                                value = sessionLabel,
+                                onValueChange = { sessionLabel = it },
+                                label = { Text("Session Goal Name") },
+                                shape = RoundedCornerShape(12.dp),
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedBorderColor = SpaceAccent,
+                                    unfocusedBorderColor = SpaceTextSecondary,
+                                    focusedLabelColor = SpaceAccent,
+                                    unfocusedLabelColor = SpaceTextSecondary
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("session_goal_input")
                             )
                         }
 
-                        // Presets
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            listOf(15, 25, 45, 60).forEach { preset ->
-                                SuggestionChip(
-                                    onClick = { durationMinutes = preset.toFloat() },
-                                    label = { Text("$preset min") },
-                                    colors = SuggestionChipDefaults.suggestionChipColors(
-                                        labelColor = if (durationMinutes.toInt() == preset) SpaceAccent else SpaceTextPrimary
-                                    )
+                        if (selectedMode == 1) {
+                            // Pomodoro Timer Component Configuration
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = SpaceSurface),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("🍅", fontSize = 18.sp)
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text("Adjustable Pomodoro Loop", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 14.sp)
+                                        }
+                                        Text("A classic productivity cycle. Work for ${durationMinutes.toInt()}m, then rest for 5m. Repeats automatically with sound alerts.", style = MaterialTheme.typography.bodySmall, color = SpaceTextSecondary)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Duration selection (Enabled for all focus modes)
+                        if (selectedMode != 2 || durationMinutes > 0) { 
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    val label = if (selectedMode == 1) "Focus Sprint Duration" else "Duration"
+                                    Text(label, color = SpaceTextSecondary, fontSize = 13.sp)
+                                    Text("${durationMinutes.toInt()} minutes", color = SpaceAccent, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
+                                Slider(
+                                    value = durationMinutes,
+                                    onValueChange = { durationMinutes = it },
+                                    valueRange = 5f..120f,
+                                    steps = 23,
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = SpaceAccent,
+                                        activeTrackColor = SpaceAccent,
+                                        inactiveTrackColor = SpaceSurface
+                                    ),
+                                    modifier = Modifier.testTag("duration_slider")
                                 )
+                            }
+
+                            // Presets
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                val presets = if (selectedMode == 2) listOf(5, 10, 15, 20) else listOf(15, 25, 45, 60)
+                                presets.forEach { preset ->
+                                    SuggestionChip(
+                                        onClick = { durationMinutes = preset.toFloat() },
+                                        label = { Text("$preset min") },
+                                        colors = SuggestionChipDefaults.suggestionChipColors(
+                                            containerColor = if (durationMinutes.toInt() == preset) SpaceAccent.copy(alpha = 0.2f) else Color.Transparent,
+                                            labelColor = if (durationMinutes.toInt() == preset) SpaceAccent else SpaceTextPrimary
+                                        ),
+                                        modifier = Modifier.testTag("preset_$preset")
+                                    )
+                                }
                             }
                         }
 
                         Spacer(modifier = Modifier.height(6.dp))
 
+                        val ctaText = when (selectedMode) {
+                            1 -> "Start Pomodoro Loop"
+                            2 -> "Initiate Rest Break"
+                            else -> "Initiate Focus Blocker"
+                        }
+                        val btnColor = if (selectedMode == 2) SpaceTeal else SpaceAccent
+
                         Button(
                             onClick = {
-                                viewModel.startFocusSession(sessionLabel, durationMinutes.toInt(), context)
+                                when (selectedMode) {
+                                    1 -> {
+                                        // Play starting work sprint sound
+                                        com.example.service.SoundAlertManager.playBreakToWorkSound(context)
+                                        viewModel.startFocusSession(
+                                            label = "Pomodoro Work Sprint 🎯",
+                                            durationMinutes = durationMinutes.toInt(),
+                                            context = context,
+                                            isBreak = false,
+                                            isPomodoro = true,
+                                            pomodoroWorkDuration = durationMinutes.toInt()
+                                        )
+                                    }
+                                    2 -> {
+                                        // Play starting rest break sound
+                                        com.example.service.SoundAlertManager.playWorkToBreakSound(context)
+                                        viewModel.startFocusSession(
+                                            label = "Custom Rest Break ☕",
+                                            durationMinutes = durationMinutes.toInt(),
+                                            context = context,
+                                            isBreak = true,
+                                            isPomodoro = false
+                                        )
+                                    }
+                                    else -> {
+                                        // Play work start sound
+                                        com.example.service.SoundAlertManager.playBreakToWorkSound(context)
+                                        viewModel.startFocusSession(
+                                            label = sessionLabel,
+                                            durationMinutes = durationMinutes.toInt(),
+                                            context = context,
+                                            isBreak = false,
+                                            isPomodoro = false
+                                        )
+                                    }
+                                }
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(48.dp)
                                 .testTag("start_session_button"),
-                            colors = ButtonDefaults.buttonColors(containerColor = SpaceAccent),
+                            colors = ButtonDefaults.buttonColors(containerColor = btnColor),
                             shape = RoundedCornerShape(12.dp)
                         ) {
                             Icon(Icons.Default.PlayArrow, contentDescription = "Launch Session")
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Initiate Focus Blocker", fontWeight = FontWeight.Bold)
+                            Text(ctaText, fontWeight = FontWeight.Bold, color = if (selectedMode == 2) Color.Black else Color.White)
                         }
                     }
                 }
@@ -497,6 +670,7 @@ fun FocusHomeScreen(
 fun ActiveFocusClockCard(
     session: com.example.data.FocusSession,
     onStopTap: () -> Unit,
+    onTransitionTap: (nextIsBreak: Boolean) -> Unit,
     todayBlockedAttempts: Int
 ) {
     // Dynamic countdown timer animation logic
@@ -522,6 +696,14 @@ fun ActiveFocusClockCard(
         }
     }
 
+    val arcColor = if (session.isBreak) SpaceTeal else SpaceAccent
+    val headerLabel = if (session.isBreak) "BREAK ACTIVE ☕" else "FOCUS ACTIVE: ${session.label}"
+    val bodyDescription = if (session.isBreak) {
+        "Take a breather! Distractions and notification blockages are temporarily lifted. Relax your eyes and stretch."
+    } else {
+        "Screen blocker active. Apps toggled in Blocklist will be blocked automatically till the countdown ends."
+    }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -535,11 +717,13 @@ fun ActiveFocusClockCard(
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             Text(
-                text = "FOCUS ACTIVE: ${session.label}",
+                text = headerLabel,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                color = SpaceTeal,
-                modifier = Modifier.background(SpaceSurface, shape = RoundedCornerShape(6.dp)).padding(horizontal = 8.dp, vertical = 4.dp)
+                color = arcColor,
+                modifier = Modifier
+                    .background(SpaceSurface, shape = RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
             )
 
             // Animated breathing circle graphics countdown timer
@@ -558,7 +742,7 @@ fun ActiveFocusClockCard(
                     )
                     // Draw animated arc indicator
                     drawArc(
-                        color = SpaceAccent,
+                        color = arcColor,
                         startAngle = -90f,
                         sweepAngle = 360f * progressFraction,
                         useCenter = false,
@@ -583,12 +767,44 @@ fun ActiveFocusClockCard(
             }
 
             Text(
-                text = "Screen blocker active. Apps toggled in Blocklist will be blocked automatically till the countdown ends.",
+                text = bodyDescription,
                 style = MaterialTheme.typography.bodySmall,
                 color = SpaceTextSecondary,
                 textAlign = TextAlign.Center
             )
 
+            // Dynamic manual transition action buttons
+            if (session.isBreak) {
+                Button(
+                    onClick = { onTransitionTap(false) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(45.dp)
+                        .testTag("transition_to_work_btn"),
+                    colors = ButtonDefaults.buttonColors(containerColor = SpaceAccent),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = "Transition to focus")
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Resume Work Sprint 🎯", fontWeight = FontWeight.Bold, color = Color.White)
+                }
+            } else {
+                Button(
+                    onClick = { onTransitionTap(true) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(45.dp)
+                        .testTag("transition_to_break_btn"),
+                    colors = ButtonDefaults.buttonColors(containerColor = SpaceTeal),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(Icons.Default.Info, contentDescription = "Transition to break")
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Take a 5-min Rest Break ☕", fontWeight = FontWeight.Bold, color = Color.Black)
+                }
+            }
+
+            // Always provide Stop/Disconnect CTA at the bottom
             Button(
                 onClick = onStopTap,
                 modifier = Modifier
@@ -600,7 +816,7 @@ fun ActiveFocusClockCard(
             ) {
                 Icon(Icons.Default.Close, contentDescription = "Terminate session")
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("Deactivate Block Filter", fontWeight = FontWeight.Bold)
+                Text(if (session.isBreak) "Deactivate Break Session" else "Deactivate Block Filter", fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -939,129 +1155,620 @@ fun StatsDashboardScreen(
     }
 }
 
+enum class OverlayState {
+    BLOCKED,
+    TIME_TAX
+}
+
 @Composable
 fun BlockOverlayScreen(
     blockedAppName: String,
     timeLeft: String,
     quote: String,
     author: String,
-    onCloseTap: () -> Unit
+    isPowerConnected: Boolean = false,
+    onCloseTap: () -> Unit,
+    onBypassSuccess: () -> Unit = {}
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF0F172A))
-            .padding(24.dp)
-            .testTag("full_block_screen"),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
-    ) {
-        // App top identity
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(top = 16.dp)
-        ) {
-            Icon(Icons.Default.Lock, contentDescription = "Shield Alert Locked", tint = SpaceError, modifier = Modifier.size(24.dp))
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "FOCUS-FLOW LOCKED",
-                fontWeight = FontWeight.Bold,
-                fontSize = 12.sp,
-                color = SpaceError,
-                letterSpacing = 1.sp
-            )
-        }
+    var overlayState by remember { mutableStateOf(OverlayState.BLOCKED) }
 
-        // Middle container details
+    if (overlayState == OverlayState.BLOCKED) {
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(20.dp),
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
+                .fillMaxSize()
+                .background(Color(0xFF0F172A))
+                .padding(24.dp)
+                .testTag("full_block_screen"),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            Box(
-                modifier = Modifier
-                    .size(90.dp)
-                    .background(SpaceError.copy(alpha = 0.15f), shape = CircleShape),
-                contentAlignment = Alignment.Center
+            // App top identity
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = 16.dp)
             ) {
-                Icon(
-                    Icons.Default.Lock,
-                    contentDescription = "Lock overlay screen badge",
-                    tint = SpaceError,
-                    modifier = Modifier.size(42.dp)
+                Icon(Icons.Default.Lock, contentDescription = "Shield Alert Locked", tint = SpaceError, modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "FOCUS-FLOW LOCKED",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    color = SpaceError,
+                    letterSpacing = 1.sp
                 )
             }
 
-            Text(
-                text = "$blockedAppName is Blocked!",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White,
-                textAlign = TextAlign.Center
-            )
-
-            // Remaining Time Clock Box
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SpaceCard),
-                shape = RoundedCornerShape(12.dp)
+            // Middle container details
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
             ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                Box(
+                    modifier = Modifier
+                        .size(90.dp)
+                        .background(SpaceError.copy(alpha = 0.15f), shape = CircleShape),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text("$timeLeft Remaining", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = SpaceTeal)
-                    Text("active focus pomodoro sprint", fontSize = 9.sp, color = SpaceTextSecondary)
+                    Icon(
+                        Icons.Default.Lock,
+                        contentDescription = "Lock overlay screen badge",
+                        tint = SpaceError,
+                        modifier = Modifier.size(42.dp)
+                    )
+                }
+
+                Text(
+                    text = "$blockedAppName is Blocked!",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    textAlign = TextAlign.Center
+                )
+
+                // Remaining Time Clock Box
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SpaceCard),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text("$timeLeft Remaining", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = SpaceTeal)
+                        Text("active focus pomodoro sprint", fontSize = 9.sp, color = SpaceTextSecondary)
+                    }
+                }
+
+                // Beautiful motivational quote Box
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "“$quote”",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                            color = Color.White,
+                            textAlign = TextAlign.Center,
+                            lineHeight = 20.sp
+                        )
+                        Text(
+                            text = "— $author",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SpaceTeal,
+                            textAlign = TextAlign.Center
+                        )
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Beautiful motivational quote Box
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
+            // Bottom Actions
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
+                if (isPowerConnected) {
+                    Button(
+                        onClick = { overlayState = OverlayState.TIME_TAX },
+                        modifier = Modifier.fillMaxWidth().height(45.dp).testTag("power_bypass_btn"),
+                        colors = ButtonDefaults.buttonColors(containerColor = SpaceTeal),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = "Bypass charger", tint = Color.Black)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Initiate 2-min Bypass (Requires 60s Time Tax)", fontWeight = FontWeight.Bold, color = Color.Black, fontSize = 12.sp)
+                    }
+                } else {
                     Text(
-                        text = "“$quote”",
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                        color = Color.White,
+                        text = "🔌 Connect phone charger to unlock temporary bypass",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SpaceTextSecondary,
                         textAlign = TextAlign.Center,
-                        lineHeight = 22.sp
-                    )
-                    Text(
-                        text = "— $author",
-                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = SpaceTeal,
-                        textAlign = TextAlign.Center
+                        modifier = Modifier.padding(bottom = 4.dp)
                     )
+                }
+
+                Button(
+                    onClick = onCloseTap,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(45.dp)
+                        .testTag("overlay_dismiss_btn"),
+                    colors = ButtonDefaults.buttonColors(containerColor = SpaceAccent),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.Home, contentDescription = "Return home")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Back to Productivity!", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }
+    } else {
+        // Time Tax Screen
+        var taxTimeLeft by remember { mutableStateOf(60) }
+        var progressMultiplier by remember { mutableStateOf(0f) }
+
+        LaunchedEffect(Unit) {
+            taxTimeLeft = 60
+            while (taxTimeLeft > 0) {
+                delay(1000L)
+                taxTimeLeft--
+                progressMultiplier = (60 - taxTimeLeft).toFloat() / 60f
+                if (taxTimeLeft == 0) {
+                    onBypassSuccess()
                 }
             }
         }
 
-        // Bottom Action to close and return
-        Button(
-            onClick = onCloseTap,
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp)
-                .height(48.dp)
-                .testTag("overlay_dismiss_btn"),
-            colors = ButtonDefaults.buttonColors(containerColor = SpaceAccent),
-            shape = RoundedCornerShape(12.dp)
+                .fillMaxSize()
+                .background(Color(0xFF0B0F19))
+                .padding(24.dp)
+                .testTag("time_tax_screen"),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            Icon(Icons.Default.Home, contentDescription = "Return home")
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Back to Productivity!", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            // Top Identity Header
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = 16.dp)
+            ) {
+                Icon(Icons.Default.Warning, contentDescription = "Tax Trigger Warning", tint = SpaceTeal, modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "COGNITIVE TIME TAX",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    color = SpaceTeal,
+                    letterSpacing = 1.sp
+                )
+            }
+
+            // Central progress details
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(24.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(120.dp)
+                        .background(SpaceTeal.copy(alpha = 0.1f), shape = CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "${taxTimeLeft}s",
+                            fontSize = 36.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SpaceTeal
+                        )
+                        Text(
+                            text = "WAIT TIME",
+                            fontSize = 9.sp,
+                            color = SpaceTextSecondary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Text(
+                    text = "Stay here for 60 seconds to earn a 2-minute temporary bypass. Leaving this screen will cancel development.",
+                    fontSize = 14.sp,
+                    color = Color.White,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.padding(horizontal = 8.dp)
+                )
+
+                // Beautiful Linear progress bar
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    LinearProgressIndicator(
+                        progress = progressMultiplier,
+                        modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)),
+                        color = SpaceTeal,
+                        trackColor = Color(0xFF1E293B)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("0%", fontSize = 10.sp, color = SpaceTextSecondary)
+                        Text("${(progressMultiplier * 100).toInt()}% Tax Paid", fontSize = 10.sp, color = SpaceTeal, fontWeight = FontWeight.Bold)
+                        Text("100%", fontSize = 10.sp, color = SpaceTextSecondary)
+                    }
+                }
+            }
+
+            // Bottom cancel/dismiss back Button
+            Button(
+                onClick = { overlayState = OverlayState.BLOCKED },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+                    .height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = SpaceError),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "Cancel tax checkout")
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Abort Bypass (Reset Timer)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            }
         }
     }
 }
+
+@Composable
+fun AdvancedDashboardScreen(
+    viewModel: FocusViewModel,
+    allNotificationLogs: List<com.example.data.NotificationLog>,
+    allWifiAnchors: List<com.example.data.WifiAnchor>
+) {
+    val context = LocalContext.current
+    var inputSsid by remember { mutableStateOf("") }
+    var inputDuration by remember { mutableStateOf("25") }
+    var showsAddWifi by remember { mutableStateOf(false) }
+
+    // Check device admin active
+    val dpm = remember { context.getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager }
+    val componentName = remember { android.content.ComponentName(context, com.example.service.FocusDeviceAdminReceiver::class.java) }
+    var isStrictEnabled by remember { mutableStateOf(dpm.isAdminActive(componentName)) }
+
+    // Re-evaluate on Resume/State change
+    LaunchedEffect(Unit) {
+        isStrictEnabled = dpm.isAdminActive(componentName)
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp)
+    ) {
+        // Strict Protection Card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("strict_mode_card"),
+                colors = CardDefaults.cardColors(containerColor = SpaceCard),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Icon(Icons.Default.Lock, contentDescription = "Strict Protection", tint = SpaceTeal)
+                            Text("Strict Mode (Uninstall lock)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        }
+                        if (isStrictEnabled) {
+                            Text(
+                                "ACTIVE",
+                                color = SpaceTeal,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                modifier = Modifier
+                                    .background(SpaceTeal.copy(alpha = 0.15f), shape = RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        } else {
+                            Text(
+                                "INACTIVE",
+                                color = SpaceTextSecondary,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                modifier = Modifier
+                                    .background(SpaceSurface, shape = RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "Prevents deactivation of Focus-Flow and blocks access to Android Settings to bypass active focus timers. Must be enabled prior to starting a sprint.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SpaceTextSecondary,
+                        lineHeight = 18.sp
+                    )
+
+                    Button(
+                        onClick = {
+                            if (!isStrictEnabled) {
+                                val intent = Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                                    putExtra(android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN, componentName)
+                                    putExtra(android.app.admin.DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Protects Focus-Flow against forced uninstall or deactivation during active focus sessions.")
+                                }
+                                context.startActivity(intent)
+                            } else {
+                                val intent = Intent().apply {
+                                    component = android.content.ComponentName("com.android.settings", "com.android.settings.DeviceAdminSettings")
+                                }
+                                try {
+                                    context.startActivity(intent)
+                                } catch (e: Exception) {
+                                    context.startActivity(Intent(android.provider.Settings.ACTION_SETTINGS))
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(42.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isStrictEnabled) SpaceError.copy(alpha = 0.2f) else SpaceAccent
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text(
+                            text = if (isStrictEnabled) "Deactivate Strict Guard" else "Activate Strict Protection (Enables Guard)",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = if (isStrictEnabled) SpaceError else Color.White
+                        )
+                    }
+                }
+            }
+        }
+
+        // Wi-Fi SSIDs Anchor Card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("wifi_anchoring_card"),
+                colors = CardDefaults.cardColors(containerColor = SpaceCard),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Icon(Icons.Default.Settings, contentDescription = "Wi-Fi triggers", tint = SpaceAccent)
+                            Text("Wi-Fi SSID Anchoring", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        }
+
+                        IconButton(
+                            onClick = { showsAddWifi = !showsAddWifi },
+                            modifier = Modifier.background(SpaceSurface, shape = CircleShape).size(28.dp)
+                        ) {
+                            Icon(
+                                if (showsAddWifi) Icons.Default.Close else Icons.Default.Add,
+                                contentDescription = "Add Anchor",
+                                tint = SpaceAccent,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "Connect phone to study/work networks to auto-trigger a focus session block list automatically.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SpaceTextSecondary
+                    )
+
+                    if (showsAddWifi) {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier
+                                .background(SpaceSurface, shape = RoundedCornerShape(10.dp))
+                                .padding(12.dp)
+                        ) {
+                            Text("Add Wireless Study Network", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+
+                            OutlinedTextField(
+                                value = inputSsid,
+                                onValueChange = { inputSsid = it },
+                                placeholder = { Text("Enter Wi-Fi name (SSID)") },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = SpaceAccent,
+                                    unfocusedBorderColor = SpaceCard,
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedContainerColor = SpaceBackground,
+                                    unfocusedContainerColor = SpaceBackground
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+
+                            OutlinedTextField(
+                                value = inputDuration,
+                                onValueChange = { inputDuration = it },
+                                placeholder = { Text("Duration in minutes (e.g. 25)") },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = SpaceAccent,
+                                    unfocusedBorderColor = SpaceCard,
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedContainerColor = SpaceBackground,
+                                    unfocusedContainerColor = SpaceBackground
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+
+                            Button(
+                                onClick = {
+                                    if (inputSsid.isNotEmpty()) {
+                                        val mins = inputDuration.toIntOrNull() ?: 25
+                                        viewModel.addWifiAnchor(inputSsid, mins)
+                                        inputSsid = ""
+                                        showsAddWifi = false
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = SpaceAccent),
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text("Bind Study SSID", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    if (allWifiAnchors.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("No SSID anchors added yet.", color = SpaceTextSecondary, fontSize = 12.sp)
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            allWifiAnchors.forEach { anchor ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(SpaceSurface, shape = RoundedCornerShape(8.dp))
+                                        .padding(vertical = 8.dp, horizontal = 12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Icon(Icons.Default.Settings, contentDescription = "Active Wi-Fi SSID", tint = SpaceTeal, modifier = Modifier.size(16.dp))
+                                        Column {
+                                            Text(anchor.ssid, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                            Text("Schedules ${anchor.durationMinutes}m focus session", color = SpaceTextSecondary, fontSize = 10.sp)
+                                        }
+                                    }
+                                    IconButton(
+                                        onClick = { viewModel.deleteWifiAnchor(anchor) },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(Icons.Default.Delete, contentDescription = "Delete SSID Anchor", tint = SpaceError, modifier = Modifier.size(16.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Calm Focus Digest (Intercepted notifications) Card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("notification_digest_card"),
+                colors = CardDefaults.cardColors(containerColor = SpaceCard),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Icon(Icons.Default.Notifications, contentDescription = "suppressed items", tint = SpaceAccent)
+                            Text("Calm Focus Digest", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        }
+
+                        if (allNotificationLogs.isNotEmpty()) {
+                            TextButton(onClick = { viewModel.clearNotificationDigest() }) {
+                                Text("Clear All", color = SpaceError, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    Text(
+                        text = "Suppress dopamine notifications during focus sessions. Delayed alerts appear here so you can browse them on your own schedule.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = SpaceTextSecondary,
+                        lineHeight = 18.sp
+                    )
+
+                    if (allNotificationLogs.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(80.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Icon(Icons.Default.Check, contentDescription = "Clean Digest Inbox", tint = SpaceTeal, modifier = Modifier.size(24.dp))
+                                Text("Your notification digest inbox is wonderfully empty.", color = SpaceTextSecondary, fontSize = 11.sp)
+                            }
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            allNotificationLogs.forEach { log ->
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(containerColor = SpaceSurface),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                Icon(Icons.Default.Star, contentDescription = "suppressed notification log app icon badge", tint = SpaceAccent, modifier = Modifier.size(12.dp))
+                                                Text(log.appName, color = SpaceAccent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                            }
+                                            val timeFormat = SimpleDateFormat("h:mm a", Locale.getDefault())
+                                            Text(timeFormat.format(Date(log.timestamp)), color = SpaceTextSecondary, fontSize = 9.sp)
+                                        }
+                                        Text(log.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                        if (log.text.isNotEmpty()) {
+                                            Text(log.text, color = SpaceTextSecondary, fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

@@ -77,11 +77,41 @@ class FocusBlockerService : Service() {
                 val now = System.currentTimeMillis()
                 if (now >= activeSession.endTime) {
                     // Session completed
-                    repository.completeActiveSession()
-                    withContext(Dispatchers.Main) {
-                        stopBlocking()
+                    if (activeSession.isPomodoro) {
+                        if (!activeSession.isBreak) {
+                            // Work sprint completed! Transition to Pomodoro Break!
+                            SoundAlertManager.playWorkToBreakSound(this@FocusBlockerService)
+                            repository.completeActiveSession()
+                            repository.startSession(
+                                label = "Pomodoro Rest Break ☕",
+                                durationMinutes = 5,
+                                isBreak = true,
+                                isPomodoro = true,
+                                pomodoroWorkDuration = activeSession.pomodoroWorkDuration
+                            )
+                        } else {
+                            // Break sprint completed! Transition to Work Sprint!
+                            SoundAlertManager.playBreakToWorkSound(this@FocusBlockerService)
+                            repository.completeActiveSession()
+                            repository.startSession(
+                                label = "Pomodoro Work Sprint 🎯",
+                                durationMinutes = activeSession.pomodoroWorkDuration,
+                                isBreak = false,
+                                isPomodoro = true,
+                                pomodoroWorkDuration = activeSession.pomodoroWorkDuration
+                            )
+                        }
+                        delay(1000L)
+                        continue
+                    } else {
+                        // Normal non-pomodoro session completed
+                        SoundAlertManager.playCompletionSound(this@FocusBlockerService)
+                        repository.completeActiveSession()
+                        withContext(Dispatchers.Main) {
+                            stopBlocking()
+                        }
+                        break
                     }
-                    break
                 }
 
                 // Check remaining time
@@ -90,41 +120,21 @@ class FocusBlockerService : Service() {
                 val remainingSec = ((remainingMs / 1000) % 60).toInt()
                 val timeLeftStr = String.format("%02d:%02d", remainingMin, remainingSec)
 
-                // Update notification
-                val updatedNotification = buildNotification(
-                    "Focusing: ${activeSession.label}",
+                // Update notification dynamically for Break vs Work
+                val notifTitle = if (activeSession.isBreak) "Rest Break ☕" else "Focus Active: ${activeSession.label}"
+                val notifText = if (activeSession.isBreak) {
+                    "Time remaining: $timeLeftStr • Screen lock and app blocks are lifted."
+                } else {
                     "Time remaining: $timeLeftStr • Focus-Flow is blocking distractions."
-                )
+                }
+
+                val updatedNotification = buildNotification(notifTitle, notifText)
                 val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 notificationManager.notify(NOTIFICATION_ID, updatedNotification)
-
-                // Monitor active app package
-                val foregroundPkg = getForegroundPackage()
-                if (foregroundPkg != null && foregroundPkg != packageName) {
-                    val blockedApps = repository.allBlockedApps.first()
-                    val targetApp = blockedApps.find { it.packageName == foregroundPkg && it.isEnabled }
-                    if (targetApp != null) {
-                        // Districted app entered! Log and trigger blocker activity!
-                        repository.logBlockedAttempt(targetApp.packageName, targetApp.appName)
-                        
-                        // Launch full-screen blocker inside our MainActivity
-                        launchBlockerScreen(targetApp.appName, timeLeftStr)
-                    }
-                }
 
                 delay(1000L) // Poll every 1 second
             }
         }
-    }
-
-    private fun launchBlockerScreen(blockedAppName: String, timeLeft: String) {
-        val blockIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra("BLOCKED_APP_NAME", blockedAppName)
-            putExtra("TIME_LEFT", timeLeft)
-            putExtra("TRIGGER_BLOCKSCREEN", true)
-        }
-        startActivity(blockIntent)
     }
 
     private fun stopBlocking() {

@@ -52,4 +52,34 @@ interface FocusDao {
 
     @Query("SELECT COUNT(*) FROM blocked_attempts WHERE timestamp >= :sinceTimestamp")
     suspend fun getBlockedAttemptCount(sinceTimestamp: Long): Int
+
+    // App Switch Logs (Doomscrolling Tracker)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAppSwitchLog(log: AppSwitchLog)
+
+    @Query("SELECT * FROM app_switch_logs WHERE timestamp >= :sinceTimestamp")
+    suspend fun getAppSwitchesSince(sinceTimestamp: Long): List<AppSwitchLog>
+
+    @Query("DELETE FROM app_switch_logs WHERE timestamp < :olderThan")
+    suspend fun deleteOldAppSwitches(olderThan: Long)
+
+    // Notification Logs (Focus Digest)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertNotificationLog(log: NotificationLog)
+
+    @Query("SELECT * FROM notification_logs ORDER BY timestamp DESC")
+    fun getAllNotificationLogsFlow(): Flow<List<NotificationLog>>
+
+    @Query("DELETE FROM notification_logs")
+    suspend fun clearAllNotificationLogs()
+
+    // Wifi Anchors (Geofencing)
+    @Query("SELECT * FROM wifi_anchors")
+    fun getAllWifiAnchorsFlow(): Flow<List<WifiAnchor>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertWifiAnchor(wifiAnchor: WifiAnchor)
+
+    @Delete
+    suspend fun deleteWifiAnchor(wifiAnchor: WifiAnchor)
 }

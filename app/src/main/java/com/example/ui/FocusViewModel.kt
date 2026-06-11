@@ -20,6 +20,8 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
     val activeSession: StateFlow<FocusSession?>
     val allBlockedAttempts: StateFlow<List<BlockedAttempt>>
     val todayBlockedCount: StateFlow<Int>
+    val allNotificationLogs: StateFlow<List<NotificationLog>>
+    val allWifiAnchors: StateFlow<List<WifiAnchor>>
 
     // Screen overlay block state (triggered by MainActivity intent receiving background blocks)
     private val _isBlockOverlayActive = MutableStateFlow(false)
@@ -67,14 +69,27 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
         todayBlockedCount = repository.getTodayBlockedCountFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
+        allNotificationLogs = repository.allNotificationLogs
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+        allWifiAnchors = repository.allWifiAnchors
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
         viewModelScope.launch {
             repository.seedDefaultBlockedAppsIfNeeded()
         }
     }
 
-    fun startFocusSession(label: String, durationMinutes: Int, context: Context) {
+    fun startFocusSession(
+        label: String,
+        durationMinutes: Int,
+        context: Context,
+        isBreak: Boolean = false,
+        isPomodoro: Boolean = false,
+        pomodoroWorkDuration: Int = 25
+    ) {
         viewModelScope.launch {
-            val session = repository.startSession(label, durationMinutes)
+            val session = repository.startSession(label, durationMinutes, isBreak, isPomodoro, pomodoroWorkDuration)
             // Trigger service
             val intent = Intent(context, FocusBlockerService::class.java).apply {
                 action = FocusBlockerService.ACTION_START
@@ -127,5 +142,23 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
 
     fun dismissBlockOverlay() {
         _isBlockOverlayActive.value = false
+    }
+
+    fun clearNotificationDigest() {
+        viewModelScope.launch {
+            repository.clearNotificationDigest()
+        }
+    }
+
+    fun addWifiAnchor(ssid: String, durationMinutes: Int = 25) {
+        viewModelScope.launch {
+            repository.insertWifiAnchor(ssid, durationMinutes)
+        }
+    }
+
+    fun deleteWifiAnchor(anchor: WifiAnchor) {
+        viewModelScope.launch {
+            repository.deleteWifiAnchor(anchor.ssid)
+        }
     }
 }
