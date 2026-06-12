@@ -162,12 +162,12 @@ class FocusAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
 
-        // 1. App-switching doomscrolling log & check
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            val pkgName = event.packageName?.toString() ?: return
+        val pkgName = event.packageName?.toString() ?: ""
 
+        // 1. App-switching doomscrolling log & check
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && pkgName.isNotEmpty()) {
             // Avoid logging our own app layout states or system UI
-            if (pkgName != packageName && pkgName != "com.android.systemui" && !pkgName.contains("launcher")) {
+            if (pkgName != packageName && pkgName != "com.android.systemui" && !pkgName.contains("launcher") && pkgName != "android") {
                 if (pkgName != lastLoggedPackage) {
                     lastLoggedPackage = pkgName
                     serviceScope.launch {
@@ -186,55 +186,68 @@ class FocusAccessibilityService : AccessibilityService() {
                     }
                 }
             }
+        }
+
+        // Real-time direct in-memory checks to align blocking flawlessly and with extreme performance
+        val sessionActive = isSessionActive
+
+        if (sessionActive) {
+            // Critical Safe Check: Avoid dismissing overlay if package is empty, system UI, system dialog, or our own app.
+            if (pkgName.isEmpty() || pkgName == "com.android.systemui" || pkgName == "android" || pkgName == packageName) {
+                return
+            }
 
             // 2. Settings Uninstall block (Strict mode) deactivation block
-            if (isSessionActive && pkgName == "com.android.settings") {
+            if (pkgName == "com.android.settings") {
                 // Settings is opened during active session. Block Settings to enforce the block!
                 showOverlay("Android Settings (Strict Block Active)")
                 return
             }
 
             // 3. Normal app blacklist block
-            if (isSessionActive) {
-                if (pkgName == packageName) return
+            val blockedApp = blockedApps.find { it.packageName == pkgName && it.isEnabled }
+            if (blockedApp != null) {
+                // Check if current bypass is active
+                if (System.currentTimeMillis() < temporaryBypassUntil) {
+                    // User is inside 2-minute temporary bypass
+                    return
+                }
 
-                val blockedApp = blockedApps.find { it.packageName == pkgName && it.isEnabled }
-                if (blockedApp != null) {
-                    // Check if current bypass is active
-                    if (System.currentTimeMillis() < temporaryBypassUntil) {
-                        // User is inside 2-minute temporary bypass
-                        return
-                    }
-
-                    // Distraction detected! Log attempt
+                // Distraction detected! Log attempt asynchronously
+                serviceScope.launch {
+                    repository.logBlockedAttempt(blockedApp.packageName, blockedApp.appName)
+                }
+                showOverlay(blockedApp.appName)
+            } else {
+                // Check browser URL scanning if the app is a mobile browser
+                if (isBrowserPackage(pkgName)) {
+                    // Launch browser scans asynchronously to keep service responsive
                     serviceScope.launch {
-                        repository.logBlockedAttempt(blockedApp.packageName, blockedApp.appName)
-                    }
-                    showOverlay(blockedApp.appName)
-                } else {
-                    // Check browser URL scanning if the app is a mobile browser
-                    if (isBrowserPackage(pkgName)) {
                         val rootNode = rootInActiveWindow
                         val urlText = findUrlInNodes(rootNode)
                         if (urlText != null) {
                             val blacklistedDomain = matchesBlacklistedDomain(urlText)
                             if (blacklistedDomain != null) {
                                 if (System.currentTimeMillis() < temporaryBypassUntil) {
-                                    return
+                                    return@launch
                                 }
-                                serviceScope.launch {
-                                    repository.logBlockedAttempt(pkgName, blacklistedDomain)
+                                repository.logBlockedAttempt(pkgName, blacklistedDomain)
+                                withContext(Dispatchers.Main) {
+                                    showOverlay("$blacklistedDomain (Web)")
                                 }
-                                showOverlay("$blacklistedDomain (Web)")
-                                return
+                                return@launch
                             }
                         }
+                        withContext(Dispatchers.Main) {
+                            dismissOverlay()
+                        }
                     }
+                } else {
                     dismissOverlay()
                 }
-            } else {
-                dismissOverlay()
             }
+        } else {
+            dismissOverlay()
         }
     }
 
@@ -291,7 +304,15 @@ class FocusAccessibilityService : AccessibilityService() {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            Log.e("FocusBlocker", "Overlay permission is missing; cannot display overlay!")
+            Log.e("FocusBlocker", "Overlay permission is missing; falling back to Home redirect + Blockscreen Activity.")
+            redirectUserToHome()
+            val mainIntent = Intent(this, com.example.MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra("TRIGGER_BLOCKSCREEN", true)
+                putExtra("BLOCKED_APP_NAME", appName)
+                putExtra("TIME_LEFT", "Active Focus")
+            }
+            startActivity(mainIntent)
             return
         }
 
@@ -358,25 +379,11 @@ class FocusAccessibilityService : AccessibilityService() {
                         }
                     }
 
-                    val quotes = listOf(
-                        "Deep work is not a nice-to-have, it's a superpower." to "Cal Newport",
-                        "Focus is a muscle, and you build it by choosing what to ignore." to "Unknown",
-                        "Your mind is for having ideas, not holding them." to "David Allen",
-                        "You will never reach your destination if you stop and throw stones at every dog that barks." to "Winston Churchill",
-                        "The successful warrior is the average man, with laser-like focus." to "Bruce Lee",
-                        "Distraction is the enemy of direction." to "Unknown",
-                        "Disconnect to reconnect with your true goals." to "Unknown",
-                        "Focus on being productive instead of busy." to "Tim Ferriss",
-                        "Starve your distractions, feed your focus." to "Unknown",
-                        "Quiet the mind, and the soul will speak." to "Ma Jaya Sati Bhagavati"
-                    )
-                    val randomQuote = remember { quotes.random() }
-
                     BlockOverlayScreen(
                         blockedAppName = currentApp.value,
                         timeLeft = timeLeft,
-                        quote = randomQuote.first,
-                        author = randomQuote.second,
+                        quote = "",
+                        author = "",
                         isPowerConnected = isPowerConnected,
                         onCloseTap = {
                             redirectUserToHome()

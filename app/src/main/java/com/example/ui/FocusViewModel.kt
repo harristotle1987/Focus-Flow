@@ -3,13 +3,20 @@ package com.example.ui
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.service.FocusBlockerService
 import com.example.data.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+
+data class InstalledApp(
+    val packageName: String,
+    val appName: String
+)
 
 class FocusViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -22,6 +29,9 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
     val todayBlockedCount: StateFlow<Int>
     val allNotificationLogs: StateFlow<List<NotificationLog>>
     val allWifiAnchors: StateFlow<List<WifiAnchor>>
+
+    private val _installedApps = MutableStateFlow<List<InstalledApp>>(emptyList())
+    val installedApps: StateFlow<List<InstalledApp>> = _installedApps.asStateFlow()
 
     // Screen overlay block state (triggered by MainActivity intent receiving background blocks)
     private val _isBlockOverlayActive = MutableStateFlow(false)
@@ -50,6 +60,14 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
     private val _randomQuote = MutableStateFlow(quotes.first())
     val randomQuote: StateFlow<Pair<String, String>> = _randomQuote.asStateFlow()
 
+    private val _isSoundEnabled = MutableStateFlow(com.example.service.SoundAlertManager.isSoundEnabled(application))
+    val isSoundEnabled: StateFlow<Boolean> = _isSoundEnabled.asStateFlow()
+
+    fun setSoundEnabled(enabled: Boolean) {
+        _isSoundEnabled.value = enabled
+        com.example.service.SoundAlertManager.setSoundEnabled(getApplication(), enabled)
+    }
+
     init {
         val database = AppDatabase.getDatabase(application)
         repository = FocusRepository(database.focusDao())
@@ -77,6 +95,32 @@ class FocusViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             repository.seedDefaultBlockedAppsIfNeeded()
+        }
+        loadInstalledApps()
+    }
+
+    fun loadInstalledApps() {
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val pm = getApplication<Application>().packageManager
+                val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
+                    addCategory(Intent.CATEGORY_LAUNCHER)
+                }
+                val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
+                val currentPkg = getApplication<Application>().packageName
+                val appList = resolveInfos
+                    .filter { it.activityInfo.packageName != currentPkg }
+                    .map { info ->
+                        InstalledApp(
+                            packageName = info.activityInfo.packageName,
+                            appName = info.loadLabel(pm).toString()
+                        )
+                    }.distinctBy { it.packageName }
+                    .sortedBy { it.appName.lowercase() }
+                _installedApps.value = appList
+            } catch (e: java.lang.Exception) {
+                e.printStackTrace()
+            }
         }
     }
 

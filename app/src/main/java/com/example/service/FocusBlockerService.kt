@@ -120,6 +120,37 @@ class FocusBlockerService : Service() {
                 val remainingSec = ((remainingMs / 1000) % 60).toInt()
                 val timeLeftStr = String.format("%02d:%02d", remainingMin, remainingSec)
 
+                // Secondary Fallback App Blocker Shield via Usage Access
+                if (!activeSession.isBreak) {
+                    val foregroundPkg = getForegroundPackage()
+                    if (foregroundPkg != null && foregroundPkg != packageName && foregroundPkg != "com.android.systemui" && !foregroundPkg.contains("launcher")) {
+                        val dbBlockedApps = repository.allBlockedApps.first()
+                        val blockedApp = dbBlockedApps.find { it.packageName == foregroundPkg && it.isEnabled }
+                        if (blockedApp != null) {
+                            Log.d("FocusBlockerService", "Foreground app $foregroundPkg is blocked. Enforcing block!")
+                            
+                            // Log blocked attempt
+                            repository.logBlockedAttempt(blockedApp.packageName, blockedApp.appName)
+                            
+                            // 1. Kick them to Home
+                            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                                addCategory(Intent.CATEGORY_HOME)
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            }
+                            startActivity(homeIntent)
+                            
+                            // 2. Launch block overlay in MainActivity
+                            val mainIntent = Intent(this@FocusBlockerService, MainActivity::class.java).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                putExtra("TRIGGER_BLOCKSCREEN", true)
+                                putExtra("BLOCKED_APP_NAME", blockedApp.appName)
+                                putExtra("TIME_LEFT", timeLeftStr)
+                            }
+                            startActivity(mainIntent)
+                        }
+                    }
+                }
+
                 // Update notification dynamically for Break vs Work
                 val notifTitle = if (activeSession.isBreak) "Rest Break ☕" else "Focus Active: ${activeSession.label}"
                 val notifText = if (activeSession.isBreak) {
@@ -144,21 +175,26 @@ class FocusBlockerService : Service() {
     }
 
     private fun getForegroundPackage(): String? {
-        val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-        val endTime = System.currentTimeMillis()
-        val startTime = endTime - 10000 // Look back 10 seconds
+        return try {
+            val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val endTime = System.currentTimeMillis()
+            val startTime = endTime - 10000 // Look back 10 seconds
 
-        val usageEvents = usageStatsManager.queryEvents(startTime, endTime)
-        val event = UsageEvents.Event()
-        var lastForegroundApp: String? = null
+            val usageEvents = usageStatsManager.queryEvents(startTime, endTime)
+            val event = UsageEvents.Event()
+            var lastForegroundApp: String? = null
 
-        while (usageEvents.hasNextEvent()) {
-            usageEvents.getNextEvent(event)
-            if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
-                lastForegroundApp = event.packageName
+            while (usageEvents.hasNextEvent()) {
+                usageEvents.getNextEvent(event)
+                if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
+                    lastForegroundApp = event.packageName
+                }
             }
+            lastForegroundApp
+        } catch (e: Exception) {
+            Log.e("FocusBlockerService", "Error querying usage events", e)
+            null
         }
-        return lastForegroundApp
     }
 
     private fun createNotificationChannel() {
