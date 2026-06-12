@@ -271,6 +271,13 @@ fun FocusHomeScreen(
     var durationMinutes by remember { mutableStateOf(25f) }
     var selectedMode by remember { mutableStateOf(1) } // Default to Pomodoro mode as requested
 
+    // Notification permission request launcher for Android 13+
+    val notificationPermissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        onRefreshPermissions()
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -319,7 +326,8 @@ fun FocusHomeScreen(
         }
 
         // Permission check alert widget block
-        if (!hasStatsPerm || !hasOverlayPerm || !hasAccessibilityPerm) {
+        val needsNotifyPerm = !hasNotifyPerm && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU
+        if (!hasStatsPerm || !hasOverlayPerm || !hasAccessibilityPerm || needsNotifyPerm) {
             item {
                 Card(
                     modifier = Modifier
@@ -381,6 +389,19 @@ fun FocusHomeScreen(
                                     .testTag("grant_usage_btn")
                             ) {
                                 Text("3. Grant Usage Access (Optional Dynamic Stats)", fontSize = 11.sp, color = SpaceTextPrimary)
+                            }
+                        }
+
+                        if (needsNotifyPerm) {
+                            Button(
+                                onClick = { notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS) },
+                                colors = ButtonDefaults.buttonColors(containerColor = SpaceAccent),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("grant_notification_btn")
+                            ) {
+                                Text("4. Grant Notification Alert Permission", fontSize = 12.sp)
                             }
                         }
 

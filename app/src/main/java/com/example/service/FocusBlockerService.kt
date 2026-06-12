@@ -48,7 +48,15 @@ class FocusBlockerService : Service() {
                 startBlocking(sessionId)
             }
             ACTION_STOP -> {
-                stopBlocking()
+                serviceScope.launch {
+                    val s = repository.getActiveSession()
+                    if (s != null && s.isActive) {
+                        FocusNotificationManager.sendSessionEndNotification(this@FocusBlockerService, s.label, completedSuccessfully = false)
+                    }
+                    withContext(Dispatchers.Main) {
+                        stopBlocking()
+                    }
+                }
             }
         }
         return START_STICKY
@@ -63,6 +71,12 @@ class FocusBlockerService : Service() {
         monitoringJob?.cancel()
         monitoringJob = serviceScope.launch {
             repository.seedDefaultBlockedAppsIfNeeded()
+
+            // Notify Focus Session starts
+            val activeSessionOnStart = repository.getActiveSession()
+            if (activeSessionOnStart != null && activeSessionOnStart.isActive) {
+                FocusNotificationManager.sendSessionStartNotification(this@FocusBlockerService, activeSessionOnStart.label)
+            }
 
             while (isActive) {
                 val activeSession = repository.getActiveSession()
@@ -81,6 +95,7 @@ class FocusBlockerService : Service() {
                         if (!activeSession.isBreak) {
                             // Work sprint completed! Transition to Pomodoro Break!
                             SoundAlertManager.playWorkToBreakSound(this@FocusBlockerService)
+                            FocusNotificationManager.sendSessionEndNotification(this@FocusBlockerService, activeSession.label, completedSuccessfully = true)
                             repository.completeActiveSession()
                             repository.startSession(
                                 label = "Pomodoro Rest Break ☕",
@@ -89,9 +104,11 @@ class FocusBlockerService : Service() {
                                 isPomodoro = true,
                                 pomodoroWorkDuration = activeSession.pomodoroWorkDuration
                             )
+                            FocusNotificationManager.sendSessionStartNotification(this@FocusBlockerService, "Pomodoro Rest Break ☕")
                         } else {
                             // Break sprint completed! Transition to Work Sprint!
                             SoundAlertManager.playBreakToWorkSound(this@FocusBlockerService)
+                            FocusNotificationManager.sendSessionEndNotification(this@FocusBlockerService, activeSession.label, completedSuccessfully = true)
                             repository.completeActiveSession()
                             repository.startSession(
                                 label = "Pomodoro Work Sprint 🎯",
@@ -100,12 +117,14 @@ class FocusBlockerService : Service() {
                                 isPomodoro = true,
                                 pomodoroWorkDuration = activeSession.pomodoroWorkDuration
                             )
+                            FocusNotificationManager.sendSessionStartNotification(this@FocusBlockerService, "Pomodoro Work Sprint 🎯")
                         }
                         delay(1000L)
                         continue
                     } else {
                         // Normal non-pomodoro session completed
                         SoundAlertManager.playCompletionSound(this@FocusBlockerService)
+                        FocusNotificationManager.sendSessionEndNotification(this@FocusBlockerService, activeSession.label, completedSuccessfully = true)
                         repository.completeActiveSession()
                         withContext(Dispatchers.Main) {
                             stopBlocking()
@@ -131,6 +150,9 @@ class FocusBlockerService : Service() {
                             
                             // Log blocked attempt
                             repository.logBlockedAttempt(blockedApp.packageName, blockedApp.appName)
+
+                            // Warn the user with a notification
+                            FocusNotificationManager.sendBlockedAppWarningPlatform(this@FocusBlockerService, blockedApp.appName)
                             
                             // 1. Kick them to Home
                             val homeIntent = Intent(Intent.ACTION_MAIN).apply {

@@ -1,6 +1,8 @@
 package com.example.service
 
 import android.accessibilityservice.AccessibilityService
+import android.app.ActivityManager
+import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -33,6 +35,7 @@ import com.example.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import java.util.TreeMap
 
 // Custom FrameLayout subclass to intercept all key events (specifically Back button)
 class KeyInterceptingView(context: Context, private val onBackPress: () -> Unit) : FrameLayout(context) {
@@ -124,6 +127,9 @@ class FocusAccessibilityService : AccessibilityService() {
         val wifiFilter = IntentFilter(WifiManager.NETWORK_STATE_CHANGED_ACTION)
         registerReceiver(wifiReceiver, wifiFilter)
 
+        // Start high-frequency proactive polling (Aggressive implementation)
+        startForegroundPolling()
+
         // Collect repository states reactively
         serviceScope.launch {
             repository.activeSessionFlow.collectLatest { session ->
@@ -159,14 +165,193 @@ class FocusAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun getActiveWindowPackage(): String? {
+        val rootNode = try { rootInActiveWindow } catch (e: Exception) { null }
+        val accPkg = rootNode?.packageName?.toString()
+        if (accPkg != null) {
+            return accPkg
+        }
+        // Fallback: check focused window in the list of windows
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            val windowList = try { windows } catch (e: Exception) { null }
+            if (windowList != null) {
+                for (window in windowList) {
+                    if (window.isFocused) {
+                        val root = try { window.root } catch (e: Exception) { null }
+                        val pkg = root?.packageName?.toString()
+                        if (!pkg.isNullOrEmpty()) {
+                            return pkg
+                        }
+                    }
+                }
+            }
+        }
+        return getForegroundPackage()
+    }
+
+    private fun getPackageNamesFromWindows(): Set<String> {
+        val packages = mutableSetOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            val windowList = try { windows } catch (e: Exception) { null }
+            if (windowList != null) {
+                for (window in windowList) {
+                    if (window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION) {
+                        val root = try { window.root } catch (e: Exception) { null }
+                        val pkg = root?.packageName?.toString()
+                        if (!pkg.isNullOrEmpty()) {
+                            packages.add(pkg)
+                        }
+                    }
+                }
+            }
+        }
+        return packages
+    }
+
+    private data class BlockDecision(
+        val shouldBlock: Boolean,
+        val appName: String = "",
+        val packageName: String = ""
+    )
+
+    private fun evaluateActivePackages(): BlockDecision {
+        if (!isSessionActive) {
+            return BlockDecision(false)
+        }
+
+        // 1. Gather all unique packages currently visible/active
+        val candidatePackages = mutableSetOf<String>()
+        
+        val activePkg = getActiveWindowPackage()
+        if (activePkg != null) {
+            candidatePackages.add(activePkg)
+        }
+        
+        candidatePackages.addAll(getPackageNamesFromWindows())
+
+        // 2. Iterate through candidate packages to check for block conditions
+        for (pkg in candidatePackages) {
+            if (pkg.isEmpty()) continue
+            if (pkg == packageName) continue
+
+            // A. Settings Force-Stop Prevention Block (Strict Mode)
+            if (pkg == "com.android.settings" || pkg.contains("com.google.android.settings")) {
+                val root = try { rootInActiveWindow } catch (e: Exception) { null }
+                if (root != null) {
+                    val textNodes = root.findAccessibilityNodeInfosByText(packageName)
+                    if (textNodes != null && textNodes.isNotEmpty()) {
+                        return BlockDecision(true, "Focus-Flow Protection (Strict)", pkg)
+                    }
+                }
+                return BlockDecision(true, "Android Settings (Strict Block Active)", pkg)
+            }
+
+            // B. Normal Blacklist Block
+            val blockedApp = blockedApps.find { it.packageName == pkg && it.isEnabled }
+            if (blockedApp != null) {
+                if (System.currentTimeMillis() < temporaryBypassUntil) {
+                    continue // Bypassed
+                }
+                return BlockDecision(true, blockedApp.appName, pkg)
+            }
+        }
+
+        // C. If no direct app matches, check browser URL scanning if the active app is a browser
+        if (activePkg != null && isBrowserPackage(activePkg)) {
+            val rootNode = try { rootInActiveWindow } catch (e: Exception) { null }
+            val urlText = findUrlInNodes(rootNode)
+            if (urlText != null) {
+                val blacklistedDomain = matchesBlacklistedDomain(urlText)
+                if (blacklistedDomain != null) {
+                    if (System.currentTimeMillis() >= temporaryBypassUntil) {
+                        return BlockDecision(true, "$blacklistedDomain (Web)", activePkg)
+                    }
+                }
+            }
+        }
+
+        return BlockDecision(false)
+    }
+
+    private fun performPackageEnforcement(decision: BlockDecision) {
+        if (decision.shouldBlock) {
+            if (currentBlockedAppName != decision.appName) {
+                // Warn the user with a notification
+                FocusNotificationManager.sendBlockedAppWarningPlatform(this, decision.appName)
+                serviceScope.launch {
+                    repository.logBlockedAttempt(decision.packageName, decision.appName)
+                }
+            }
+            showOverlay(decision.appName)
+        } else {
+            val activePkg = getActiveWindowPackage() ?: ""
+            val isTransientSystem = activePkg == "com.android.systemui" || activePkg == "android"
+            if (!isTransientSystem) {
+                dismissOverlay()
+            }
+        }
+    }
+
+    private fun evaluateAndEnforce() {
+        if (!isSessionActive) {
+            dismissOverlay()
+            return
+        }
+        val decision = evaluateActivePackages()
+        performPackageEnforcement(decision)
+    }
+
+    private fun startForegroundPolling() {
+        serviceScope.launch {
+            while (isActive) {
+                if (isSessionActive) {
+                    withContext(Dispatchers.Main) {
+                        evaluateAndEnforce()
+                    }
+                }
+                delay(250L) // Poll every 250ms (Aggressive)
+            }
+        }
+    }
+
+    private fun getForegroundPackage(): String? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            val usm = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
+            val time = System.currentTimeMillis()
+            val stats = usm?.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, time - 1000 * 60, time)
+            if (stats != null && stats.isNotEmpty()) {
+                val sortedMap = TreeMap<Long, android.app.usage.UsageStats>()
+                for (usageStats in stats) {
+                    sortedMap[usageStats.lastTimeUsed] = usageStats
+                }
+                return sortedMap.isEmpty().let { if (it) null else sortedMap.lastEntry()?.value?.packageName }
+            }
+        } else {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            @Suppress("DEPRECATION")
+            val tasks = am?.getRunningTasks(1)
+            return tasks?.firstOrNull()?.topActivity?.packageName
+        }
+        return null
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
 
         val pkgName = event.packageName?.toString() ?: ""
 
+        // Detect Recents panel attempts to prevent app peeking
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+             if (pkgName == "com.android.systemui" && event.className?.toString()?.contains("Recents", ignoreCase = true) == true) {
+                 if (currentBlockedAppName != null || isSessionActive) {
+                     performGlobalAction(GLOBAL_ACTION_HOME)
+                     return
+                 }
+             }
+        }
+
         // 1. App-switching doomscrolling log & check
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && pkgName.isNotEmpty()) {
-            // Avoid logging our own app layout states or system UI
             if (pkgName != packageName && pkgName != "com.android.systemui" && !pkgName.contains("launcher") && pkgName != "android") {
                 if (pkgName != lastLoggedPackage) {
                     lastLoggedPackage = pkgName
@@ -177,7 +362,6 @@ class FocusAccessibilityService : AccessibilityService() {
                         if (switches.size > 5) {
                             val active = repository.getActiveSession()
                             if (active == null || !active.isActive) {
-                                // Trigger automatic block session!
                                 repository.startSession("Automatic Doomscroll Protection", 15)
                                 repository.clearOldAppSwitches()
                                 Log.d("FocusAccessibility", "Doomscrolling detected (>5 switches/10m). Started automatic Lockout Session!")
@@ -188,66 +372,13 @@ class FocusAccessibilityService : AccessibilityService() {
             }
         }
 
-        // Real-time direct in-memory checks to align blocking flawlessly and with extreme performance
-        val sessionActive = isSessionActive
-
-        if (sessionActive) {
-            // Critical Safe Check: Avoid dismissing overlay if package is empty, system UI, system dialog, or our own app.
-            if (pkgName.isEmpty() || pkgName == "com.android.systemui" || pkgName == "android" || pkgName == packageName) {
-                return
-            }
-
-            // 2. Settings Uninstall block (Strict mode) deactivation block
-            if (pkgName == "com.android.settings") {
-                // Settings is opened during active session. Block Settings to enforce the block!
-                showOverlay("Android Settings (Strict Block Active)")
-                return
-            }
-
-            // 3. Normal app blacklist block
-            val blockedApp = blockedApps.find { it.packageName == pkgName && it.isEnabled }
-            if (blockedApp != null) {
-                // Check if current bypass is active
-                if (System.currentTimeMillis() < temporaryBypassUntil) {
-                    // User is inside 2-minute temporary bypass
-                    return
-                }
-
-                // Distraction detected! Log attempt asynchronously
-                serviceScope.launch {
-                    repository.logBlockedAttempt(blockedApp.packageName, blockedApp.appName)
-                }
-                showOverlay(blockedApp.appName)
-            } else {
-                // Check browser URL scanning if the app is a mobile browser
-                if (isBrowserPackage(pkgName)) {
-                    // Launch browser scans asynchronously to keep service responsive
-                    serviceScope.launch {
-                        val rootNode = rootInActiveWindow
-                        val urlText = findUrlInNodes(rootNode)
-                        if (urlText != null) {
-                            val blacklistedDomain = matchesBlacklistedDomain(urlText)
-                            if (blacklistedDomain != null) {
-                                if (System.currentTimeMillis() < temporaryBypassUntil) {
-                                    return@launch
-                                }
-                                repository.logBlockedAttempt(pkgName, blacklistedDomain)
-                                withContext(Dispatchers.Main) {
-                                    showOverlay("$blacklistedDomain (Web)")
-                                }
-                                return@launch
-                            }
-                        }
-                        withContext(Dispatchers.Main) {
-                            dismissOverlay()
-                        }
-                    }
-                } else {
-                    dismissOverlay()
-                }
-            }
-        } else {
+        if (!isSessionActive) {
             dismissOverlay()
+            return
+        }
+
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && pkgName.isNotEmpty()) {
+            evaluateAndEnforce()
         }
     }
 
@@ -298,6 +429,11 @@ class FocusAccessibilityService : AccessibilityService() {
     }
 
     private fun showOverlay(appName: String) {
+        // Aggressive Home Flush: Ensure the app is gone first
+        if (currentBlockedAppName == null) {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+        }
+
         if (interceptingView != null) {
             currentBlockedAppName = appName
             return
@@ -331,10 +467,13 @@ class FocusAccessibilityService : AccessibilityService() {
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                     WindowManager.LayoutParams.FLAG_FULLSCREEN or
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.FILL
+            screenOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
 
         val lifecycleOwner = ServiceLifecycleOwner().apply {
